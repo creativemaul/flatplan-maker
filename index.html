@@ -246,7 +246,8 @@ body:not(.printing) .print-title,body:not(.printing) .print-footer{display:none!
     <button class="b" onclick="toggleVP()">Versions</button>
     <button class="b" onclick="expJSON()">Export</button>
     <button class="b" onclick="impJSON()">Import</button>
-    <button class="b bp" onclick="openPDFExport()">PDF</button>
+    <button class="b bp" onclick="cloudSave()" id="cloudBtn">☁ Share</button>
+    <button class="b" onclick="openPDFExport()">PDF</button>
   </div>
 </div>
 
@@ -275,6 +276,7 @@ body:not(.printing) .print-title,body:not(.printing) .print-footer{display:none!
   <button class="b bs" onclick="openAssignSub()">Assign Subsection</button>
   <button class="b bs" onclick="markSel('')">Clear Marks</button>
   <button class="b bs" onclick="clearSecSel()">Clear Section</button>
+  <button class="b bs" onclick="dupSel()">Duplicate</button>
   <button class="b bs" onclick="openInsert()">Insert Pages</button>
   <button class="b bs" onclick="moveToPB()">→ Pasteboard</button>
   <button class="b bs bd" onclick="delSel()">Delete</button>
@@ -478,6 +480,12 @@ function init(){
   document.addEventListener('mouseup',onMU);
   if(!S.pages.length)openNewProj(); else render();
   loadVL();
+  // Check for shared cloud link
+  const hash=window.location.hash;
+  if(hash.startsWith('#cloud=')){
+    const blobId=hash.slice(7);
+    if(blobId) cloudLoad(blobId);
+  }
 }
 
 /* ═══  RENDER  ═══ */
@@ -756,6 +764,23 @@ function dupPg(id){
   const c={...arr[i],id:uid(),name:arr[i].name+' (copy)'};arr.splice(i+1,0,c);render();toast('Duplicated');
 }
 function delPg(id){snapshot();S.pages=S.pages.filter(p=>p.id!==id);S.pasteboard=S.pasteboard.filter(p=>p.id!==id);sel.delete(id);render();toast('Removed');}
+function dupSel(){
+  if(!sel.size){toast('Select pages first');return;}
+  snapshot();
+  const newSel=new Set();
+  sel.forEach(id=>{
+    let arr=S.pages,i=arr.findIndex(p=>p.id===id);
+    if(i===-1){arr=S.pasteboard;i=arr.findIndex(p=>p.id===id);}
+    if(i===-1)return;
+    const c={...arr[i],id:uid(),name:arr[i].name+' (copy)'};
+    arr.splice(i+1,0,c);
+    newSel.add(c.id);
+  });
+  sel.clear();
+  newSel.forEach(id=>sel.add(id));
+  render();
+  toast(newSel.size+' page(s) duplicated');
+}
 
 /* ═══  INSERT PAGES  ═══ */
 function openInsert(){
@@ -908,6 +933,61 @@ function expJSON(){const d=JSON.stringify({...S,_sec:sections,_sub:subsections},
 function impJSON(){$('fi').click();}
 function doImport(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=ev=>{try{const d=JSON.parse(ev.target.result);if(d.pages){S={...S,...d};if(!S.pasteboard)S.pasteboard=[];sections=d._sec||[];subsections=d._sub||[];$('ptitle').value=S.title;sel.clear();render();toast('Imported');}}catch{toast('Error');}};r.readAsText(f);e.target.value='';}
 
+/* ═══  CLOUD SYNC  ═══ */
+let cloudBlobId = localStorage.getItem('fp_cloud_id') || '';
+
+async function cloudSave(){
+  const btn=$('cloudBtn');
+  btn.textContent='☁ Saving...';btn.disabled=true;
+  const d=JSON.stringify({...S,_sec:sections,_sub:subsections});
+  try{
+    let resp;
+    if(cloudBlobId){
+      resp=await fetch('https://jsonblob.com/api/jsonBlob/'+cloudBlobId,{method:'PUT',headers:{'Content-Type':'application/json','Accept':'application/json'},body:d});
+      if(!resp.ok) throw new Error('Update failed');
+    }else{
+      resp=await fetch('https://jsonblob.com/api/jsonBlob',{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json'},body:d});
+      if(!resp.ok) throw new Error('Create failed');
+      const loc=resp.headers.get('Location')||resp.headers.get('location')||'';
+      cloudBlobId=loc.split('/').pop();
+      if(!cloudBlobId){const j=await resp.json();cloudBlobId=j.id||'';}
+      localStorage.setItem('fp_cloud_id',cloudBlobId);
+    }
+    const shareURL=window.location.origin+window.location.pathname+'#cloud='+cloudBlobId;
+    try{await navigator.clipboard.writeText(shareURL);toast('Link copied! Share it to open on any device');}
+    catch{prompt('Share this link to open on any device:',shareURL);toast('Saved to cloud');}
+    if(window.location.hash!=='#cloud='+cloudBlobId) history.replaceState(null,'',shareURL);
+  }catch(e){
+    console.error(e);
+    toast('Cloud save failed — try Export instead');
+  }
+  btn.textContent='☁ Share';btn.disabled=false;
+}
+
+async function cloudLoad(blobId){
+  try{
+    toast('Loading from cloud...');
+    const resp=await fetch('https://jsonblob.com/api/jsonBlob/'+blobId,{headers:{'Accept':'application/json'}});
+    if(!resp.ok) throw new Error('Not found');
+    const d=await resp.json();
+    if(d.pages){
+      S={...S,...d};
+      if(!S.pasteboard)S.pasteboard=[];
+      sections=d._sec||[];
+      subsections=d._sub||[];
+      $('ptitle').value=S.title;
+      cloudBlobId=blobId;
+      localStorage.setItem('fp_cloud_id',blobId);
+      sel.clear();
+      render();
+      toast('Loaded from cloud');
+    }
+  }catch(e){
+    console.error(e);
+    toast('Could not load shared flatplan');
+  }
+}
+
 /* ═══  HELPERS  ═══ */
 function $(id){return document.getElementById(id);}
 function uid(){return'f'+Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
@@ -918,7 +998,16 @@ function updCt(){
   const m4=c%4===0;
   $('pgc').innerHTML=`${c} total pages · ${folio} folio pages `+(c>0?(m4?'<span style="color:var(--grn)">● ×4</span>':'<span style="color:var(--red)">● not ×4</span>'):'');
 }
-function autosave(){localStorage.setItem('fp_auto',JSON.stringify({...S,_sec:sections,_sub:subsections}));}
+function autosave(){
+  localStorage.setItem('fp_auto',JSON.stringify({...S,_sec:sections,_sub:subsections}));
+  // Auto-sync to cloud if connected (debounced)
+  if(cloudBlobId){
+    clearTimeout(autosave._ct);
+    autosave._ct=setTimeout(()=>{
+      fetch('https://jsonblob.com/api/jsonBlob/'+cloudBlobId,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({...S,_sec:sections,_sub:subsections})}).catch(()=>{});
+    },3000);
+  }
+}
 function opM(id){$(id).classList.add('on');}
 function clM(id){$(id).classList.remove('on');}
 function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),2500);}
